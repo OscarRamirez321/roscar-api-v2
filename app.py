@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from openai import OpenAI
 from elevenlabs.client import ElevenLabs
 import re
@@ -9,9 +9,9 @@ app = Flask(__name__)
 # Configura Flask para manejar UTF-8
 app.config['JSON_AS_ASCII'] = False
 
-# Configura las claves API
-openai_client = OpenAI(api_key="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")
-elevenlabs_client = ElevenLabs(api_key="sk_51f0de7e4b1c883ac49899de828b5e314c15f8b95b494d1f")
+# Configura las claves API desde variables de entorno
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
 # Lista para almacenar citas y pedidos
 citas = []
@@ -60,13 +60,17 @@ def chat():
     # Concatena los fragmentos del generador en un solo objeto bytes
     audio_bytes = b"".join(audio_generator)
 
-    # Escribe el audio en un archivo
+    # Escribe el audio en un archivo (opcional, para depuración)
     audio_path = "respuesta.mp3"
     with open(audio_path, "wb") as f:
         f.write(audio_bytes)
 
-    # Devuelve la respuesta en UTF-8
-    return jsonify({"respuesta": respuesta, "audio": audio_path})
+    # Devuelve el audio como parte de la respuesta
+    return Response(
+        audio_bytes,
+        mimetype="audio/mpeg",
+        headers={"Content-Disposition": "attachment;filename=respuesta.mp3", "X-Text-Response": respuesta}
+    )
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=int(os.getenv("PORT", 5000)))
