@@ -1,76 +1,64 @@
-from flask import Flask, request, jsonify, Response
-from openai import OpenAI
-from elevenlabs.client import ElevenLabs
-import re
-import os
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# Configura Flask para manejar UTF-8
-app.config['JSON_AS_ASCII'] = False
+# Lista de carros disponibles en Auto Source Network (para la demostración)
+car_inventory = [
+    {"make": "BMW", "model": "X5", "year": 2020, "price": 38900, "mileage": 45000},
+    {"make": "Mercedes-Benz", "model": "C-Class", "year": 2019, "price": 29900, "mileage": 52000},
+    {"make": "Ford", "model": "F-150", "year": 2021, "price": 42900, "mileage": 38000},
+    {"make": "Lexus", "model": "RX 350", "year": 2018, "price": 34900, "mileage": 60000},
+]
 
-# Configura las claves API desde variables de entorno
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+@app.route('/whatsapp', methods=['POST'])
+def whatsapp():
+    # Obtener el mensaje del cliente
+    incoming_msg = request.values.get('Body', '').lower().strip()
+    from_number = request.values.get('From', '')
 
-# Lista para almacenar citas y pedidos
-citas = []
-pedidos = []
+    # Crear la respuesta de Twilio
+    twilio_response = MessagingResponse()
+    msg = twilio_response.message()
 
-@app.route('/chat', methods=['POST'])
-def chat():
-    # Asegúrate de que el mensaje esté decodificado como UTF-8
-    pregunta = request.json['message']
+    # Presentación inicial de Pedro si el mensaje incluye "hola" o es el primer mensaje
+    if "hola" in incoming_msg:
+        response_text = "¡Hola! Soy Pedro, tu asistente en Auto Source Network aquí en Sarasota. 😊 ¿Buscas un carro o necesitas ayuda con algo?"
+        msg.body(response_text)
+        return str(twilio_response)
 
-    # Detectar si el usuario quiere agendar una cita
-    if "cita" in pregunta.lower() or "agendar" in pregunta.lower():
-        match = re.search(r"(lunes|martes|miércoles|jueves|viernes|sábado|domingo) a las (\d{1,2})", pregunta.lower())
-        if match:
-            dia, hora = match.groups()
-            cita = f"Cita agendada para el {dia} a las {hora}:00."
-            citas.append(cita)
-            respuesta = cita
-        else:
-            respuesta = "Por favor, dime el día y la hora para agendar tu cita. Por ejemplo: 'Quiero una cita para el viernes a las 10'."
-    # Detectar si el usuario quiere hacer un pedido
-    elif "pedido" in pregunta.lower() or "quiero un" in pregunta.lower():
-        pedidos.append(pregunta)
-        respuesta = f"Pedido registrado: {pregunta}. Te contactaremos para confirmar los detalles."
-    else:
-        # Respuesta de la API de OpenAI
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Eres Roscar, un asistente de atención al cliente de Moto Express Solutions, un taller de motos. Eres experto en motos, muy amable y profesional. Puedes responder preguntas sobre servicios, precios, motos en stock, y ayudar a agendar citas o tomar pedidos."},
-                {"role": "user", "content": pregunta}
-            ]
-        )
-        respuesta = response.choices[0].message.content
+    # Responder a preguntas sobre el inventario
+    if "carros" in incoming_msg or "inventario" in incoming_msg or "disponible" in incoming_msg:
+        response_text = "Claro, tenemos varios carros disponibles. Aquí algunos:\n"
+        for car in car_inventory[:3]:  # Mostrar solo 3 carros para mantener el mensaje corto
+            response_text += f"- {car['make']} {car['model']} {car['year']} por ${car['price']} ({car['mileage']} millas)\n"
+        response_text += "¿Te interesa alguno? Puedo darte más detalles."
+        msg.body(response_text)
+        return str(twilio_response)
 
-    # Genera el audio de la respuesta
-    audio_generator = elevenlabs_client.generate(
-        text=respuesta,
-        voice="Adam",
-        model="eleven_multilingual_v2",
-        voice_settings={
-            "stability": 0.5,
-            "similarity_boost": 0.8
-        }
-    )
-    # Concatena los fragmentos del generador en un solo objeto bytes
-    audio_bytes = b"".join(audio_generator)
+    # Responder a preguntas sobre un carro específico (por ejemplo, "BMW" o "F-150")
+    for car in car_inventory:
+        if car['make'].lower() in incoming_msg or car['model'].lower() in incoming_msg:
+            response_text = f"El {car['make']} {car['model']} {car['year']} que tenemos cuesta ${car['price']} y tiene {car['mileage']} millas. ¿Quieres venir a verlo o necesitas más info?"
+            msg.body(response_text)
+            return str(twilio_response)
 
-    # Escribe el audio en un archivo (opcional, para depuración)
-    audio_path = "respuesta.mp3"
-    with open(audio_path, "wb") as f:
-        f.write(audio_bytes)
+    # Responder a preguntas sobre financiamiento
+    if "financiamiento" in incoming_msg or "credito" in incoming_msg or "pago" in incoming_msg:
+        response_text = "¡Claro! En Auto Source Network ofrecemos financiamiento, incluso si tienes buen crédito, mal crédito o no tienes crédito. ¿Te gustaría que te ayude a pre-aprobarte?"
+        msg.body(response_text)
+        return str(twilio_response)
 
-    # Devuelve el audio como parte de la respuesta
-    return Response(
-        audio_bytes,
-        mimetype="audio/mpeg",
-        headers={"Content-Disposition": "attachment;filename=respuesta.mp3", "X-Text-Response": respuesta}
-    )
+    # Responder a preguntas sobre test drives
+    if "test drive" in incoming_msg or "probar" in incoming_msg:
+        response_text = "¡Genial! Podemos agendar un test drive. ¿Qué carro te gustaría probar? Estamos en Sarasota, abiertos de lunes a sábado."
+        msg.body(response_text)
+        return str(twilio_response)
+
+    # Respuesta por defecto si no entiende el mensaje
+    response_text = "No estoy seguro de cómo ayudarte con eso. ¿Buscas un carro, información sobre financiamiento o quieres agendar un test drive?"
+    msg.body(response_text)
+    return str(twilio_response)
 
 if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(debug=True, host="0.0.0.0", port=5001)
