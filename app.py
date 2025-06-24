@@ -1,101 +1,271 @@
-from flask import Flask, request, jsonify, Response
-from openai import OpenAI
-from elevenlabs.client import ElevenLabs
-import re
+# ==============================================================================
+# soluIA v2.6 - Asesor de Ventas Multicanal (Web + WhatsApp)
+# Arquitectura: Máquina de Estados Finitos (FSM) con Clases
+# Desarrollado por: Oscar Ramirez (CEO) y Gemini (CTO)
+# ==============================================================================
+
+# --- 1. IMPORTACIÓN DE LIBRERÍAS Y HERRAMIENTAS ---
 import os
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from flask import Flask, request, jsonify, render_template, make_response
+from openai import OpenAI
+from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
+from twilio.twiml.messaging_response import MessagingResponse
 
-app = Flask(__name__)
-
-# Configura Flask para manejar UTF-8
-app.config['JSON_AS_ASCII'] = False
-
-# Configura las claves API desde variables de entorno
+# --- 2. CONFIGURACIÓN INICIAL ---
+load_dotenv()
+app = Flask(__name__, template_folder='templates')
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
-# Lista para almacenar citas y pedidos
-citas = []
-pedidos = []
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
-# Lista de carros disponibles en Auto Source Network
-car_inventory = [
-    {"make": "BMW", "model": "X5", "year": 2020, "price": 38900, "mileage": 45000},
-    {"make": "Mercedes-Benz", "model": "C-Class", "year": 2019, "price": 29900, "mileage": 52000},
-    {"make": "Ford", "model": "F-150", "year": 2021, "price": 42900, "mileage": 38000},
-    {"make": "Lexus", "model": "RX 350", "year": 2018, "price": 34900, "mileage": 60000},
-]
+# "Base de datos" de sesiones en memoria. Clave: session_id, Valor: instancia de ConversacionManager
+user_sessions = {}
 
-# Contexto para Open AI
-SYSTEM_MESSAGE = """
-Eres Pedro, un vendedor y asistente de atención al cliente en Auto Source Network, un dealership en Sarasota. Trabajas ahí y eres una persona real, así que habla como tal: amigable, profesional y directo, como si estuvieras chateando con un cliente en persona. Siempre saluda al cliente con un "¡Hola!" al inicio de tu respuesta, incluso si el cliente no dice "hola". Usa un tono cálido y humano, como lo haría un vendedor que quiere ayudar al cliente a encontrar el carro perfecto.
+print("✅ Servidor soluIA v2.6 (Multicanal) iniciado.")
 
-Aquí está el inventario de carros disponibles:
-- BMW X5 2020 por $38900 (45000 millas)
-- Mercedes-Benz C-Class 2019 por $29900 (52000 millas)
-- Ford F-150 2021 por $42900 (38000 millas)
-- Lexus RX 350 2018 por $34900 (60000 millas)
+# --- 3. FUNCIONES DE APOYO ---
 
-Tu objetivo es ayudar al cliente a encontrar un carro, ofrecer financiamiento, o agendar test drives. Si el cliente pregunta por un carro específico, dale los detalles y sugiérele un test drive. Si pregunta por financiamiento, dile que Auto Source Network tiene opciones para buen crédito, mal crédito o sin crédito, y ofrécete a pre-aprobarlo. Si quiere un test drive, ofrécete a agendar uno y menciona que estás en Sarasota, abierto de lunes a sábado. Si el cliente dice que quiere un carro pero no especifica cuál, pregúntale qué tipo de carro busca (por ejemplo, "¿Buscas algo de lujo como un BMW o más bien una camioneta como un Ford F-150?") y sugiere opciones del inventario.
+def get_sheet():
+    """Se conecta de forma segura a Google Sheets."""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
+        client = gspread.authorize(creds)
+        return client.open("Inventario Rodrigo").sheet1
+    except Exception as e:
+        print(f"❌ Error crítico al conectar con Google Sheets: {e}")
+        return None
 
-También puedes agendar citas para test drives (por ejemplo, "Quiero una cita para el viernes a las 10") y registrar pedidos de carros (por ejemplo, "Quiero comprar un BMW X5"). Si no entiendes el mensaje, pide aclaraciones de manera amable o sugiere opciones como buscar un carro, financiamiento o un test drive.
-"""
+def buscar_productos_por_termino(sheet, termino_busqueda):
+    """
+    LÓGICA DE BÚSQUEDA AVANZADA (Inspirada en tu versión):
+    Busca productos que contengan palabras clave de la frase del usuario.
+    """
+    if not sheet or not termino_busqueda: return []
+    try:
+        resultados = []
+        list_of_rows = sheet.get_all_values()
+        
+        stopwords = {"y","o","de","la","el","en","un","una","quisiera","quiero"}
+        palabras_usuario = set(re.findall(r'\b\w+\b', termino_busqueda.lower()))
+        palabras_clave = palabras_usuario - stopwords
 
-@app.route('/chat', methods=['POST'])
-def chat():
-    # Asegúrate de que el mensaje esté decodificado como UTF-8
-    pregunta = request.json['message']
+        print(f"🕵️  Palabras clave para buscar: {palabras_clave}")
 
-    # Detectar si el usuario quiere agendar una cita
-    if "cita" in pregunta.lower() or "agendar" in pregunta.lower():
-        match = re.search(r"(lunes|martes|miércoles|jueves|viernes|sábado|domingo) a las (\d{1,2})", pregunta.lower())
-        if match:
-            dia, hora = match.groups()
-            cita = f"Cita agendada para el {dia} a las {hora}:00."
-            citas.append(cita)
-            respuesta = cita
+        for row in list_of_rows[1:]:
+            if len(row) < 3: continue
+            nombre_producto_lower = row[0].lower()
+            try:
+                stock = int(row[1])
+            except (ValueError, IndexError):
+                stock = 0
+
+            if stock > 0 and any(clave in nombre_producto_lower for clave in palabras_clave):
+                resultados.append({"nombre": row[0], "stock": stock, "precio": float(row[2])})
+        
+        print(f"📦 Búsqueda finalizada. Se encontraron {len(resultados)} productos.")
+        return resultados
+    except Exception as e:
+        print(f"❌ Error al buscar productos: {e}")
+        return []
+
+def enviar_email_pedido(datos):
+    """Función completa y robusta para enviar notificación de pedido por email."""
+    if not all([EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_RECEIVER]):
+        print("⚠️  Credenciales de email no configuradas en .env.")
+        return False
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = f"soluIA Bot <{EMAIL_ADDRESS}>"
+        msg["To"] = EMAIL_RECEIVER
+        msg["Subject"] = f"Nuevo pedido de {datos.get('nombre')}"
+        
+        total = sum(item['precio'] * item.get('cantidad', 1) for item in datos.get('carrito', []))
+        
+        texto = f"Cliente: {datos.get('nombre')}\nTel: {datos.get('telefono')}\nDir: {datos.get('direccion')}\nRef: {datos.get('referencia')}\nCédula: {datos.get('cedula')}\nPago: {datos.get('metodo_pago')}\n\nProductos:\n"
+        for item in datos.get('carrito', []):
+            subtotal = item['precio'] * item.get('cantidad', 1)
+            texto += f"- {item.get('cantidad', 1)} x {item.get('nombre', 'N/A')} = C${subtotal:.2f}\n"
+        texto += f"\nTotal: C${total:.2f}"
+        
+        msg.attach(MIMEText(texto, "plain"))
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Email enviado con éxito.")
+        return True
+    except Exception as e:
+        print(f"❌ Error enviando email: {e}")
+        return False
+
+# --- 4. LA MÁQUINA DE ESTADOS (FSM) ---
+
+class ConversacionManager:
+    """Maneja el estado y la lógica de la conversación para un único usuario."""
+    def __init__(self, session_id):
+        session_data = user_sessions.get(session_id, {"estado": "inicio", "datos_recolectados": {"carrito": []}})
+        self.session_id = session_id
+        self.estado = session_data["estado"]
+        self.datos = session_data["datos_recolectados"]
+
+    def guardar_estado(self):
+        user_sessions[self.session_id] = {"estado": self.estado, "datos_recolectados": self.datos}
+
+    def siguiente_paso(self, msg):
+        texto = msg.strip().lower()
+        
+        # Intenciones generales que pueden reiniciar o dar info rápida
+        if re.search(r'\b(hola|buenas|hey)\b', texto):
+            return "¡Hola! Soy Rodrigo, tu asistente virtual. ¿Qué producto buscas hoy?"
+        if re.search(r'\b(gracias|adiós|chao|bye)\b', texto):
+            user_sessions.pop(self.session_id, None)
+            return "¡Un gusto atenderte! Si necesitas algo más, aquí estoy. 😊"
+        if re.search(r'\b(dónde|ubicación|dirección)\b', texto):
+            return "📍 Estamos en Km 14 Carretera a Masaya, Managua."
+        
+        sheet = get_sheet()
+        if not sheet: return "Lo siento, el sistema de inventario no está disponible."
+
+        # Flujo por Estados
+        if self.estado == "esperando_seleccion_producto":
+            try:
+                opts = self.datos["opciones_listadas"]
+                idx = int(texto) - 1
+                if 0 <= idx < len(opts):
+                    prod = opts[idx]
+                    self.datos["producto_temp"] = prod
+                    self.estado = "esperando_cantidad"
+                    return f"✅ Seleccionado '{prod['nombre']}'. ¿Cuántas unidades deseas cotizar?"
+                else:
+                    return "Ese número no está en la lista. Intenta de nuevo."
+            except ValueError:
+                return self.procesar_busqueda(msg, sheet)
+
+        elif self.estado == "esperando_cantidad":
+            m = re.search(r'\d+', texto)
+            if not m: return "Por favor indica la cantidad en números."
+            
+            cant = int(m.group())
+            prod = self.datos["producto_temp"]
+            if cant > prod["stock"]: return f"Solo hay {prod['stock']} unidades."
+            
+            self.datos["carrito"].append({**prod, "cantidad": cant})
+            self.estado = "menu_post_agregado"
+            return f"✅ Agregado. Tienes {len(self.datos['carrito'])} ítems.\n¿Deseas añadir otro producto o finalizar?"
+
+        elif self.estado == "menu_post_agregado":
+            if "otro" in texto:
+                self.estado = "inicio"
+                return "¿Qué otro producto buscas?"
+            if "finalizar" in texto or "comprar" in texto:
+                self.estado = "esperando_nombre"
+                return "Perfecto, dime tu nombre completo."
+            return "¿Deseas otro producto o finalizar?"
+
+        # (El resto del flujo de recolección de datos que diseñaste, integrado aquí)
+        elif self.estado == "esperando_nombre":
+            self.datos["nombre"] = msg.title().strip()
+            self.estado = "esperando_telefono"
+            return f"¡Gracias {self.datos['nombre']}! ¿Tu teléfono?"
+        
+        elif self.estado == "esperando_telefono":
+            num = re.sub(r'\D', '', msg)
+            if len(num) < 7: return "Teléfono inválido, intenta de nuevo."
+            self.datos["telefono"] = num
+            self.estado = "esperando_direccion"
+            return "¿Dirección de entrega?"
+            
+        elif self.estado == "esperando_direccion":
+            self.datos["direccion"] = msg.strip()
+            self.estado = "esperando_referencia"
+            return "¿Punto de referencia?"
+            
+        elif self.estado == "esperando_referencia":
+            self.datos["referencia"] = msg.strip()
+            self.estado = "esperando_cedula"
+            return "¿Número de cédula para factura?"
+            
+        elif self.estado == "esperando_cedula":
+            ced = msg.strip()
+            if not re.fullmatch(r'[0-9A-Za-z]{5,15}', ced): return "Cédula inválida."
+            self.datos["cedula"] = ced
+            self.estado = "esperando_metodo_pago"
+            return "Elige método de pago: Efectivo o Transferencia."
+            
+        elif self.estado == "esperando_metodo_pago":
+            self.datos["metodo_pago"] = msg.strip().title()
+            enviar_email_pedido(self.datos)
+            resumen = "✅ Pedido registrado. Te contactaremos pronto. ¡Gracias!"
+            # Reiniciar para la próxima conversación
+            self.estado = "inicio"
+            self.datos = {"carrito": []}
+            return resumen
+        
+        # Estado inicial
         else:
-            respuesta = "Por favor, dime el día y la hora para agendar tu cita. Por ejemplo: 'Quiero una cita para el viernes a las 10'."
-    # Detectar si el usuario quiere hacer un pedido específico (por ejemplo, "Quiero comprar un BMW X5")
-    elif "quiero comprar un" in pregunta.lower() or "pedido de un" in pregunta.lower():
-        pedidos.append(pregunta)
-        respuesta = f"Entendido, he registrado tu pedido: {pregunta}. Te contactaremos pronto para confirmar los detalles."
-    else:
-        # Respuesta de la API de OpenAI
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": SYSTEM_MESSAGE},
-                {"role": "user", "content": pregunta}
-            ],
-            max_tokens=100,  # Limitamos para mantener las respuestas cortas
-            temperature=0.7,
-        )
-        respuesta = response.choices[0].message.content
+            return self.procesar_busqueda(texto, sheet)
 
-    # Genera el audio de la respuesta
-    audio_generator = elevenlabs_client.generate(
-        text=respuesta,
-        voice="Adam",
-        model="eleven_multilingual_v2",
-        voice_settings={
-            "stability": 0.5,
-            "similarity_boost": 0.8
-        }
-    )
-    # Concatena los fragmentos del generador en un solo objeto bytes
-    audio_bytes = b"".join(audio_generator)
+    def procesar_busqueda(self, msg, sheet):
+        encontrados = buscar_productos_por_termino(sheet, msg)
+        if not encontrados: return "No hallé productos con ese nombre. ¿Pruebas otro término?"
+        
+        if len(encontrados) == 1:
+            p = encontrados[0]
+            self.datos["producto_temp"] = p
+            self.estado = "esperando_cantidad"
+            return f"✅ Encontré '{p['nombre']}' a C${p['precio']:.2f}. ¿Cuántas unidades deseas cotizar?"
+        
+        self.datos["opciones_listadas"] = encontrados
+        self.estado = "esperando_seleccion_producto"
+        texto = "He encontrado:\n" + "\n".join([f"{i+1}. {p['nombre']} – C${p['precio']:.2f}" for i,p in enumerate(encontrados)])
+        texto += "\n\nElige el número del producto que te interesa."
+        return texto
 
-    # Escribe el audio en un archivo (opcional, para depuración)
-    audio_path = "respuesta.mp3"
-    with open(audio_path, "wb") as f:
-        f.write(audio_bytes)
+# --- 5. ENDPOINTS ---
+@app.route('/')
+def home():
+    return render_template('index.html')
 
-    # Devuelve el audio como parte de la respuesta
-    return Response(
-        audio_bytes,
-        mimetype="audio/mpeg",
-        headers={"Content-Disposition": "attachment;filename=respuesta.mp3", "X-Text-Response": respuesta}
-    )
+@app.route("/chat_web", methods=['POST'])
+def chat_web():
+    session_id = request.json.get('session_id', 'web_user')
+    msg = request.json.get('message', '')
+    
+    # Cada usuario tiene su propia conversación
+    if session_id not in user_sessions:
+        user_sessions[session_id] = {}
+        
+    manager = ConversacionManager(session_id)
+    resp = manager.siguiente_paso(msg)
+    manager.guardar_estado()
+    
+    return jsonify({'reply': resp})
 
-if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+@app.route("/whatsapp", methods=['POST'])
+def whatsapp_reply():
+    from_num = request.values.get('From', '')
+    body = request.values.get('Body', '')
+    
+    if from_num not in user_sessions:
+        user_sessions[from_num] = {}
+        
+    manager = ConversacionManager(from_num)
+    resp = manager.siguiente_paso(body)
+    manager.guardar_estado()
+    
+    twresp = MessagingResponse()
+    twresp.message(resp)
+    return make_response(str(twresp), 200)
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5001)

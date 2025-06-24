@@ -1,1 +1,18 @@
-respuesta.mp3
+# Archivos de Entorno Virtual
+venv/
+/venv/
+
+# Archivos de Credenciales y Secretos
+# ¡NUNCA SUBAS ESTOS ARCHIVOS!
+.env
+credentials.json
+
+# Archivos de Cache de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de Sistema Operativo
+.DS_Store
+Thumbs.db

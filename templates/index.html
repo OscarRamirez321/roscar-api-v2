@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo Bot - soluIA</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f7f7f7; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        #chat-container { width: 420px; height: 90vh; max-height: 700px; border: 1px solid #e0e0e0; background: white; display: flex; flex-direction: column; box-shadow: 0 4px 12px rgba(0,0,0,0.1); border-radius: 12px; }
+        .header { background-color: #007bff; color: white; padding: 15px; text-align: center; border-top-left-radius: 12px; border-top-right-radius: 12px; }
+        .header h3 { margin: 0; font-size: 18px; }
+        .header p { margin: 4px 0 0; font-size: 12px; opacity: 0.9; }
+        #messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        .message { padding: 10px 15px; border-radius: 20px; max-width: 80%; line-height: 1.5; word-wrap: break-word; }
+        .user { background-color: #007bff; color: white; align-self: flex-end; }
+        .bot { background-color: #e9e9eb; color: #333; align-self: flex-start; }
+        #input-container { display: flex; padding: 15px; border-top: 1px solid #e0e0e0; }
+        #message-input { flex: 1; border: 1px solid #ccc; border-radius: 20px; padding: 10px 15px; font-size: 14px; }
+        #send-button { background-color: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 50%; cursor: pointer; width: 44px; height: 44px; font-size: 18px; }
+    </style>
+</head>
+<body>
+    <div id="chat-container">
+        <div class="header">
+            <h3>Demo Ferretería Hernández</h3>
+            <p>Powered by <strong>soluIA</strong></p>
+        </div>
+        <div id="messages"></div>
+        <div id="input-container">
+            <input type="text" id="message-input" placeholder="Pregúntale algo al bot...">
+            <button id="send-button">➤</button>
+        </div>
+    </div>
+
+    <script>
+        const messagesDiv = document.getElementById('messages');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+
+        async function sendMessage() {
+            const messageText = messageInput.value.trim();
+            if (messageText === '') return;
+
+            addMessage(messageText, 'user');
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+
+            try {
+                // Esta es la ruta que añadiremos en nuestro app.py
+                const response = await fetch('/chat_web', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: messageText })
+                });
+                const data = await response.json();
+                addMessage(data.reply, 'bot');
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage('Lo siento, hubo un error de conexión con el servidor.', 'bot');
+            } finally {
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                messageInput.focus();
+            }
+        }
+
+        function addMessage(text, sender) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', sender);
+            // Reemplazamos los saltos de línea del bot con <br> para que se muestren en HTML
+            messageElement.innerHTML = text.replace(/\n/g, '<br>');
+            messagesDiv.appendChild(messageElement);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+        
+        // Mensaje de bienvenida del bot
+        addMessage('¡Hola! Soy Rodrigo, tu asistente virtual. ¿En qué puedo ayudarte hoy?', 'bot');
+    </script>
+</body>
+</html>
